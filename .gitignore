@@ -1,0 +1,24 @@
+# Compiled binaries & build artifacts
+target/
+*.class
+*.jar
+*.war
+*.ear
+
+# macOS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# IDE specific files
+.idea/
+*.iml
+.vscode/
+*.sw?
+
+# Log files
+*.log
+
+# Docker local data
+pgdata/

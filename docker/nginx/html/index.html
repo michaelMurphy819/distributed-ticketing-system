@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CSC 2405 — Distributed Systems Ticketing Monitor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    </style>
+</head>
+<body class="bg-slate-100 text-slate-800 min-h-screen">
+
+    <!-- Top Navigation / Header -->
+    <header class="bg-white border-b border-slate-200">
+        <div class="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+                <span class="font-semibold text-slate-900 text-base">CSC 2405 Distributed Systems</span>
+                <span class="text-slate-300">|</span>
+                <span class="text-sm text-slate-600">Ticketing Concurrency Monitor</span>
+            </div>
+            <div class="flex items-center space-x-3 text-xs">
+                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full font-medium bg-emerald-100 text-emerald-800">
+                    Cluster Active
+                </span>
+                <button onclick="resetEvent(100)" class="px-2.5 py-1 bg-white border border-slate-300 hover:bg-slate-50 rounded text-slate-700 font-medium">
+                    Reset DB (100)
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-6xl mx-auto px-6 py-6 space-y-6">
+
+        <!-- Status Banner (shown on oversell) -->
+        <div id="oversell-alert" class="hidden p-3.5 bg-red-50 border border-red-200 rounded text-red-800 text-sm flex items-center justify-between">
+            <div>
+                <span class="font-bold">Concurrency Integrity Violation:</span>
+                <span class="ml-1 text-red-700">Race condition detected. The system confirmed more bookings than available tickets.</span>
+            </div>
+            <span id="banner-count" class="font-mono font-bold bg-red-200 text-red-900 px-2 py-0.5 rounded text-xs"></span>
+        </div>
+
+        <!-- Inventory State Cards -->
+        <div class="grid grid-cols-1 sm:grid-cols-4 gap-4">
+            <div class="bg-white border border-slate-200 rounded p-4 shadow-sm">
+                <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Available Tickets</div>
+                <div class="mt-2 flex items-baseline space-x-2">
+                    <span id="stat-available" class="text-3xl font-bold font-mono text-slate-900">--</span>
+                    <span class="text-xs text-slate-400">/ <span id="stat-total">100</span></span>
+                </div>
+            </div>
+
+            <div class="bg-white border border-slate-200 rounded p-4 shadow-sm">
+                <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Confirmed Bookings</div>
+                <div class="mt-2 flex items-baseline space-x-2">
+                    <span id="stat-confirmed" class="text-3xl font-bold font-mono text-slate-900">--</span>
+                    <span class="text-xs text-slate-400">PostgreSQL rows</span>
+                </div>
+            </div>
+
+            <div id="card-oversold" class="bg-white border border-slate-200 rounded p-4 shadow-sm">
+                <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Oversold Count</div>
+                <div class="mt-2 flex items-baseline space-x-2">
+                    <span id="stat-oversold" class="text-3xl font-bold font-mono text-emerald-600">0</span>
+                    <span id="stat-status-badge" class="text-xs font-medium text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded">Consistent</span>
+                </div>
+            </div>
+
+            <div class="bg-white border border-slate-200 rounded p-4 shadow-sm">
+                <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide">CAS Version</div>
+                <div class="mt-2 flex items-baseline space-x-2">
+                    <span id="stat-version" class="text-3xl font-bold font-mono text-slate-900">--</span>
+                    <span class="text-xs text-slate-400">Lock column</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Control Panel & Execution -->
+        <div class="bg-white border border-slate-200 rounded shadow-sm p-5 space-y-4">
+            <div class="text-sm font-semibold text-slate-900 border-b border-slate-100 pb-2">
+                Booking Execution Controls
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <!-- Strategy Selection -->
+                <div>
+                    <label class="block text-xs font-medium text-slate-600 mb-1">Concurrency Strategy</label>
+                    <select id="sel-strategy" class="w-full bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-slate-500">
+                        <option value="pessimistic" selected>Pessimistic (Row Lock via SELECT ... FOR UPDATE)</option>
+                        <option value="optimistic">Optimistic (CAS version = version + 1)</option>
+                        <option value="naive">Naive (No Lock — Demonstrates Overselling)</option>
+                    </select>
+                    <p class="text-[11px] text-slate-500 mt-1" id="strategy-hint">
+                        Uses database row lock. Guarantees 0 overselling.
+                    </p>
+                </div>
+
+                <!-- Single Request Form -->
+                <div>
+                    <label class="block text-xs font-medium text-slate-600 mb-1">Student User ID</label>
+                    <div class="flex space-x-2">
+                        <input id="inp-userid" type="text" value="student_101" class="flex-1 bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-slate-500">
+                        <button onclick="bookSingle()" class="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-medium rounded transition">
+                            Book 1 Ticket
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Concurrency Batch Test -->
+                <div>
+                    <label class="block text-xs font-medium text-slate-600 mb-1">Batch Concurrency Burst</label>
+                    <div class="flex space-x-2">
+                        <select id="sel-batch" class="w-32 bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-slate-500">
+                            <option value="30">30 requests</option>
+                            <option value="50" selected>50 requests</option>
+                            <option value="100">100 requests</option>
+                        </select>
+                        <button id="btn-batch" onclick="runBatchTest()" class="flex-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded transition">
+                            Fire Concurrent Batch
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Node Distribution and Request Stream Grid -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+
+            <!-- Node Distribution Table -->
+            <div class="bg-white border border-slate-200 rounded shadow-sm p-4">
+                <div class="flex items-center justify-between border-b border-slate-100 pb-2 mb-3">
+                    <span class="text-xs font-semibold text-slate-900 uppercase tracking-wide">Nginx Load Balancing</span>
+                    <button onclick="clearNodeStats()" class="text-[11px] text-slate-400 hover:text-slate-600">Reset</button>
+                </div>
+
+                <table class="w-full text-xs text-left">
+                    <thead>
+                        <tr class="text-slate-500 border-b border-slate-100 font-medium">
+                            <th class="pb-1.5">JVM Node</th>
+                            <th class="pb-1.5 text-right">Requests</th>
+                            <th class="pb-1.5 text-right">Share</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100">
+                        <tr>
+                            <td class="py-2 font-mono text-slate-700">booking-service-1</td>
+                            <td id="node-count-1" class="py-2 text-right font-mono font-medium">0</td>
+                            <td id="node-pct-1" class="py-2 text-right font-mono text-slate-500">0%</td>
+                        </tr>
+                        <tr>
+                            <td class="py-2 font-mono text-slate-700">booking-service-2</td>
+                            <td id="node-count-2" class="py-2 text-right font-mono font-medium">0</td>
+                            <td id="node-pct-2" class="py-2 text-right font-mono text-slate-500">0%</td>
+                        </tr>
+                        <tr>
+                            <td class="py-2 font-mono text-slate-700">booking-service-3</td>
+                            <td id="node-count-3" class="py-2 text-right font-mono font-medium">0</td>
+                            <td id="node-pct-3" class="py-2 text-right font-mono text-slate-500">0%</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Activity Log Table -->
+            <div class="md:col-span-2 bg-white border border-slate-200 rounded shadow-sm p-4 flex flex-col">
+                <div class="flex items-center justify-between border-b border-slate-100 pb-2 mb-3">
+                    <span class="text-xs font-semibold text-slate-900 uppercase tracking-wide">Transaction Stream</span>
+                    <button onclick="document.getElementById('log-tbody').innerHTML = ''" class="text-[11px] text-slate-400 hover:text-slate-600">Clear</button>
+                </div>
+
+                <div class="overflow-y-auto max-h-64 flex-1">
+                    <table class="w-full text-xs text-left font-mono">
+                        <thead>
+                            <tr class="text-slate-500 border-b border-slate-100">
+                                <th class="pb-1.5">Time</th>
+                                <th class="pb-1.5">User</th>
+                                <th class="pb-1.5">Strategy</th>
+                                <th class="pb-1.5">Instance</th>
+                                <th class="pb-1.5 text-right">Status</th>
+                                <th class="pb-1.5 text-right">Latency</th>
+                            </tr>
+                        </thead>
+                        <tbody id="log-tbody" class="divide-y divide-slate-100">
+                            <!-- Populated dynamically -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+        </div>
+
+    </main>
+
+    <footer class="max-w-6xl mx-auto px-6 py-4 text-xs text-slate-400 text-center">
+        CSC 2405: Distributed Systems Project — Michael Murphy
+    </footer>
+
+    <script>
+        const API_BASE = window.location.origin;
+        const nodeStats = { 'booking-service-1': 0, 'booking-service-2': 0, 'booking-service-3': 0 };
+
+        const hints = {
+            'pessimistic': 'Uses PostgreSQL SELECT ... FOR UPDATE. Guarantees 0 overselling.',
+            'optimistic': 'Atomic Compare-And-Swap check on version. Rejects conflicting updates.',
+            'naive': 'No concurrency control. Will oversell under concurrent requests.'
+        };
+
+        document.getElementById('sel-strategy').addEventListener('change', (e) => {
+            document.getElementById('strategy-hint').innerText = hints[e.target.value] || '';
+        });
+
+        async function pollStatus() {
+            try {
+                const res = await fetch(`${API_BASE}/api/events/1`);
+                if (!res.ok) return;
+                const d = await res.json();
+
+                document.getElementById('stat-available').innerText = d.availableTickets;
+                document.getElementById('stat-total').innerText = d.totalTickets;
+                document.getElementById('stat-confirmed').innerText = d.confirmedBookings;
+                document.getElementById('stat-oversold').innerText = d.oversoldTickets;
+                document.getElementById('stat-version').innerText = d.version;
+
+                const alertBox = document.getElementById('oversell-alert');
+                const badge = document.getElementById('stat-status-badge');
+                const oversoldNum = document.getElementById('stat-oversold');
+                const availNum = document.getElementById('stat-available');
+
+                if (d.oversoldTickets > 0 || d.availableTickets < 0) {
+                    alertBox.classList.remove('hidden');
+                    document.getElementById('banner-count').innerText = `+${d.oversoldTickets} oversold`;
+                    badge.innerText = 'Oversold Violation';
+                    badge.className = 'text-xs font-medium text-red-700 bg-red-50 px-1.5 py-0.5 rounded';
+                    oversoldNum.className = 'text-3xl font-bold font-mono text-red-600';
+                    availNum.className = 'text-3xl font-bold font-mono text-red-600';
+                } else {
+                    alertBox.classList.add('hidden');
+                    badge.innerText = 'Consistent';
+                    badge.className = 'text-xs font-medium text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded';
+                    oversoldNum.className = 'text-3xl font-bold font-mono text-emerald-600';
+                    availNum.className = 'text-3xl font-bold font-mono text-slate-900';
+                }
+            } catch (e) {
+                console.error("Poll failed:", e);
+            }
+        }
+
+        function recordNode(node) {
+            if (!node || nodeStats[node] === undefined) return;
+            nodeStats[node]++;
+            const total = nodeStats['booking-service-1'] + nodeStats['booking-service-2'] + nodeStats['booking-service-3'];
+            for (let i = 1; i <= 3; i++) {
+                const key = `booking-service-${i}`;
+                const count = nodeStats[key];
+                const pct = total > 0 ? ((count / total) * 100).toFixed(0) : 0;
+                document.getElementById(`node-count-${i}`).innerText = count;
+                document.getElementById(`node-pct-${i}`).innerText = `${pct}%`;
+            }
+        }
+
+        function clearNodeStats() {
+            nodeStats['booking-service-1'] = 0;
+            nodeStats['booking-service-2'] = 0;
+            nodeStats['booking-service-3'] = 0;
+            for (let i = 1; i <= 3; i++) {
+                document.getElementById(`node-count-${i}`).innerText = 0;
+                document.getElementById(`node-pct-${i}`).innerText = '0%';
+            }
+        }
+
+        function addLogRow(userId, strategy, instance, status, latencyMs) {
+            const tbody = document.getElementById('log-tbody');
+            const tr = document.createElement('tr');
+            const timeStr = new Date().toTimeString().split(' ')[0];
+
+            let statusHtml = '<span class="text-emerald-700 font-medium">201 OK</span>';
+            if (status === 409) statusHtml = '<span class="text-amber-700 font-medium">409 Conflict</span>';
+            if (status >= 500) statusHtml = '<span class="text-red-700 font-medium">500 Error</span>';
+
+            tr.innerHTML = `
+                <td class="py-1 text-slate-400">${timeStr}</td>
+                <td class="py-1 text-slate-800">${userId}</td>
+                <td class="py-1 text-slate-500">${strategy}</td>
+                <td class="py-1 text-slate-600">${instance || '-'}</td>
+                <td class="py-1 text-right">${statusHtml}</td>
+                <td class="py-1 text-right text-slate-500">${latencyMs}ms</td>
+            `;
+
+            tbody.insertBefore(tr, tbody.firstChild);
+            if (tbody.children.length > 50) tbody.removeChild(tbody.lastChild);
+        }
+
+        async function bookSingle() {
+            const strategy = document.getElementById('sel-strategy').value;
+            const userId = document.getElementById('inp-userid').value.trim() || 'student_' + Math.floor(Math.random() * 1000);
+            const start = performance.now();
+
+            try {
+                const res = await fetch(`${API_BASE}/api/bookings?strategy=${strategy}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ eventId: 1, userId: userId, ticketsCount: 1 })
+                });
+                const latency = Math.round(performance.now() - start);
+                const data = await res.json();
+                recordNode(data.handledBy);
+                addLogRow(userId, strategy, data.handledBy, res.status, latency);
+                pollStatus();
+            } catch (e) {
+                addLogRow(userId, strategy, 'cluster', 500, 0);
+            }
+        }
+
+        async function runBatchTest() {
+            const count = parseInt(document.getElementById('sel-batch').value);
+            const strategy = document.getElementById('sel-strategy').value;
+            const btn = document.getElementById('btn-batch');
+
+            btn.disabled = true;
+            btn.innerText = `Firing ${count}...`;
+
+            const promises = [];
+            for (let i = 1; i <= count; i++) {
+                const uid = `batch_${i}_${Math.floor(Math.random()*1000)}`;
+                const p = (async () => {
+                    const start = performance.now();
+                    try {
+                        const res = await fetch(`${API_BASE}/api/bookings?strategy=${strategy}`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ eventId: 1, userId: uid, ticketsCount: 1 })
+                        });
+                        const latency = Math.round(performance.now() - start);
+                        const data = await res.json();
+                        recordNode(data.handledBy);
+                        addLogRow(uid, strategy, data.handledBy, res.status, latency);
+                    } catch (e) {
+                        addLogRow(uid, strategy, 'cluster', 500, 0);
+                    }
+                })();
+                promises.push(p);
+            }
+
+            await Promise.all(promises);
+            btn.disabled = false;
+            btn.innerText = 'Fire Concurrent Batch';
+            pollStatus();
+        }
+
+        async function resetEvent(tickets = 100) {
+            try {
+                const res = await fetch(`${API_BASE}/api/events/1/reset?tickets=${tickets}`, { method: 'POST' });
+                if (res.ok) {
+                    clearNodeStats();
+                    pollStatus();
+                    addLogRow('ADMIN', 'RESET', '-', 200, 10);
+                }
+            } catch (e) {
+                console.error("Reset failed:", e);
+            }
+        }
+
+        pollStatus();
+        setInterval(pollStatus, 1000);
+    </script>
+</body>
+</html>
